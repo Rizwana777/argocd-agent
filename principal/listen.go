@@ -171,7 +171,9 @@ func (s *Server) serveGRPC(ctx context.Context, metrics *metrics.PrincipalMetric
 
 	// If the server is configured with HTTP/1 support enabled, configured and
 	// start the downgrading proxy. Otherwise, start the gRPC server.
+	log().WithField("enableWebSocket", s.enableWebSocket).Info("🔧 Checking if WebSocket is enabled")
 	if s.enableWebSocket {
+		log().Info(" WebSocket is ENABLED - using downgrading HTTP handler instead of native gRPC")
 		opts := []grpchttp1server.Option{grpchttp1server.PreferGRPCWeb(true)}
 
 		downgradingHandler := grpchttp1server.CreateDowngradingHandler(s.grpcServer, http.NotFoundHandler(), opts...)
@@ -181,13 +183,17 @@ func (s *Server) serveGRPC(ctx context.Context, metrics *metrics.PrincipalMetric
 		}
 
 		go func() {
+			log().Info("Starting WebSocket downgrading server")
 			err = downgradingServer.ServeTLS(s.listener.l, s.options.tlsCertPath, s.options.tlsKeyPath)
 			errch <- err
 		}()
 	} else {
 		// The gRPC server lives in its own go routine
+		log().Info("WebSocket is DISABLED - using native gRPC server")
 		go func() {
+			log().Info("Starting gRPC server.Serve() - server is now accepting connections")
 			err = s.grpcServer.Serve(s.listener.l)
+			log().WithError(err).Warn(" gRPC server.Serve() exited")
 			errch <- err
 		}()
 	}
@@ -215,8 +221,12 @@ func (s *Server) registerGrpcServices(metrics *metrics.PrincipalMetrics) error {
 	if err != nil {
 		return fmt.Errorf("could not create new auth server: %w", err)
 	}
+	log().Info("Registering gRPC services on principal")
 	authapi.RegisterAuthenticationServer(s.grpcServer, authSrv)
+	log().Info("Authentication service registered successfully")
 	versionapi.RegisterVersionServer(s.grpcServer, version.NewServer(s.authenticate))
+	log().Info("Version service registered successfully")
 	eventstreamapi.RegisterEventStreamServer(s.grpcServer, eventstream.NewServer(s.queues, s.eventWriters, metrics, s.clusterMgr, eventstream.WithNotifyOnConnect(s.notifyOnConnect)))
+	log().Info("EventStream service registered successfully")
 	return nil
 }

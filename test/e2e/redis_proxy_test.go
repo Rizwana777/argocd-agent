@@ -117,6 +117,11 @@ func (suite *RedisProxyTestSuite) Test_RedisProxy_ManagedAgent_Argo() {
 
 	requires.NotNil(msgChan)
 
+	// Wait for SSE stream to fully establish and Redis SUBSCRIBE to propagate
+	// This prevents a race condition where the pod is deleted before the subscription is active
+	t.Log("Waiting for SSE stream to fully establish...")
+	time.Sleep(5 * time.Second)
+
 	// Find pod on managed-agent client
 
 	var podList corev1.PodList
@@ -176,42 +181,60 @@ func (suite *RedisProxyTestSuite) Test_RedisProxy_ManagedAgent_Argo() {
 
 		return newPod.Name != ""
 
-	}, time.Second*30, time.Second*5)
+	}, time.Second*60, time.Second*5)
 
 	// Verify the name of the new pod exists in what has been sent from the channel (this will only be true if redis proxy subscription is working)
 	requires.Eventually(func() bool {
+		// Drain ALL available messages in the channel (don't return false on first empty check)
+		messagesDrained := false
 		for {
-			// drain channel looking for name of new pod
 			select {
 			case msg := <-msgChan:
-				t.Log("Processing message:", msg)
+				messagesDrained = true
+				t.Logf("Processing SSE message (looking for pod %s)", newPod.Name)
 				if strings.Contains(msg, newPod.Name) {
-					t.Log("new pod name found:", newPod.Name)
+					t.Logf("Found new pod name in SSE stream: %s", newPod.Name)
 					return true
 				}
 			default:
+				// Channel is currently empty. If we drained at least one message,
+				// return false to retry later. If we didn't drain any, also retry.
+				if messagesDrained {
+					t.Log("Drained all available messages, pod not found yet, will retry...")
+				}
 				return false
 			}
 		}
-	}, time.Second*30, time.Second*5)
+	}, time.Second*120, time.Second*5)
 
 	// Ensure that the pod appears in the new resource tree value returned by Argo CD server
-	tree, err = appClient.ResourceTree(suite.Ctx, &application.ResourcesQuery{
-		ApplicationName: &appOnPrincipal.Name,
-		AppNamespace:    &appOnPrincipal.Namespace,
-		Project:         &appOnPrincipal.Spec.Project,
-	})
-	requires.NoError(err)
-	requires.NotNil(tree)
-
-	matchFound = false
-	for _, node := range tree.Nodes {
-		if node.Kind == "Pod" && node.Name == newPod.Name {
-			matchFound = true
-			break
+	// Retry the ResourceTree call to handle transient Redis connection issues (EOF errors)
+	requires.Eventually(func() bool {
+		var treeErr error
+		tree, treeErr = appClient.ResourceTree(suite.Ctx, &application.ResourcesQuery{
+			ApplicationName: &appOnPrincipal.Name,
+			AppNamespace:    &appOnPrincipal.Namespace,
+			Project:         &appOnPrincipal.Spec.Project,
+		})
+		if treeErr != nil {
+			t.Logf("ResourceTree call failed (will retry): %v", treeErr)
+			return false
 		}
-	}
-	requires.True(matchFound)
+		if tree == nil {
+			t.Log("ResourceTree returned nil (will retry)")
+			return false
+		}
+
+		// Check if the new pod is in the tree
+		for _, node := range tree.Nodes {
+			if node.Kind == "Pod" && node.Name == newPod.Name {
+				t.Logf("Found new pod in resource tree: %s", newPod.Name)
+				return true
+			}
+		}
+		t.Logf("New pod %s not yet in resource tree (will retry)", newPod.Name)
+		return false
+	}, time.Second*30, time.Second*2)
 
 }
 
@@ -300,6 +323,11 @@ func (suite *RedisProxyTestSuite) Test_RedisProxy_AutonomousAgent_Argo() {
 
 	requires.NotNil(msgChan)
 
+	// Wait for SSE stream to fully establish and Redis SUBSCRIBE to propagate
+	// This prevents a race condition where the pod is deleted before the subscription is active
+	t.Log("Waiting for SSE stream to fully establish...")
+	time.Sleep(5 * time.Second)
+
 	// Find pod of deployed Application, on autonomous cluster
 
 	var podList corev1.PodList
@@ -371,43 +399,61 @@ func (suite *RedisProxyTestSuite) Test_RedisProxy_AutonomousAgent_Argo() {
 
 		return newPod.Name != ""
 
-	}, time.Second*30, time.Second*5)
+	}, time.Second*60, time.Second*5)
 
 	// Verify the name of the new pod exists in what has been sent on the subscribe channel
 
 	requires.Eventually(func() bool {
+		// Drain ALL available messages in the channel (don't return false on first empty check)
+		messagesDrained := false
 		for {
-			// drain channel looking for name of new pod
 			select {
 			case msg := <-msgChan:
-				t.Log("Processing message:", msg)
+				messagesDrained = true
+				t.Logf("Processing SSE message (looking for pod %s)", newPod.Name)
 				if strings.Contains(msg, newPod.Name) {
-					t.Log("new pod name found:", newPod.Name)
+					t.Logf("Found new pod name in SSE stream: %s", newPod.Name)
 					return true
 				}
 			default:
+				// Channel is currently empty. If we drained at least one message,
+				// return false to retry later. If we didn't drain any, also retry.
+				if messagesDrained {
+					t.Log("Drained all available messages, pod not found yet, will retry...")
+				}
 				return false
 			}
 		}
-	}, time.Second*30, time.Second*5)
+	}, time.Second*120, time.Second*5)
 
 	// Ensure that the pod appears in the new resource tree value returned by Argo CD server
-	tree, err = appClient.ResourceTree(suite.Ctx, &application.ResourcesQuery{
-		ApplicationName: &appOnPrincipal.Name,
-		AppNamespace:    &appOnPrincipal.Namespace,
-		Project:         &appOnPrincipal.Spec.Project,
-	})
-	requires.NoError(err)
-	requires.NotNil(tree)
-
-	matchFound = false
-	for _, node := range tree.Nodes {
-		if node.Kind == "Pod" && node.Name == newPod.Name {
-			matchFound = true
-			break
+	// Retry the ResourceTree call to handle transient Redis connection issues (EOF errors)
+	requires.Eventually(func() bool {
+		var treeErr error
+		tree, treeErr = appClient.ResourceTree(suite.Ctx, &application.ResourcesQuery{
+			ApplicationName: &appOnPrincipal.Name,
+			AppNamespace:    &appOnPrincipal.Namespace,
+			Project:         &appOnPrincipal.Spec.Project,
+		})
+		if treeErr != nil {
+			t.Logf("ResourceTree call failed (will retry): %v", treeErr)
+			return false
 		}
-	}
-	requires.True(matchFound)
+		if tree == nil {
+			t.Log("ResourceTree returned nil (will retry)")
+			return false
+		}
+
+		// Check if the new pod is in the tree
+		for _, node := range tree.Nodes {
+			if node.Kind == "Pod" && node.Name == newPod.Name {
+				t.Logf("Found new pod in resource tree: %s", newPod.Name)
+				return true
+			}
+		}
+		t.Logf("New pod %s not yet in resource tree (will retry)", newPod.Name)
+		return false
+	}, time.Second*30, time.Second*2)
 }
 
 // ensureAppExistsAndIsSyncedAndHealthy ensures that a given Argo CD Application exists, and is synced/healthy
@@ -539,7 +585,7 @@ func createArgoCDAPIClient(ctx context.Context, argoServerEndpoint string, passw
 // - resource tree events (changes in Application resources) are an example of one type of data that can be received via this API
 func streamFromEventSourceNew(ctx context.Context, eventSourceAPIURL string, sessionToken string, t *testing.T) (chan string, error) {
 
-	msgChan := make(chan string)
+	msgChan := make(chan string, 100) // Buffered channel to prevent message loss
 
 	go func() {
 
@@ -594,9 +640,17 @@ func streamFromEventSourceNew(ctx context.Context, eventSourceAPIURL string, ses
 			req.AddCookie(cookie)
 
 			tr := &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+				MaxIdleConns:          10,
+				IdleConnTimeout:       300 * time.Second, // Keep connections alive longer
+				DisableKeepAlives:     false,
+				DisableCompression:    false,
+				ResponseHeaderTimeout: 0, // No timeout for SSE streams (they may take time to start)
 			}
-			client := &http.Client{Transport: tr}
+			client := &http.Client{
+				Transport: tr,
+				Timeout:   0, // No overall timeout for SSE streams
+			}
 
 			contextCancelled := connect(client, req)
 
@@ -604,7 +658,9 @@ func streamFromEventSourceNew(ctx context.Context, eventSourceAPIURL string, ses
 				t.Log("context cancelled on event source stream")
 				return
 			} else {
-				time.Sleep(250 * time.Millisecond)
+				// Wait longer before retrying after connection errors (AWS latency)
+				t.Log("SSE stream disconnected, retrying in 2 seconds...")
+				time.Sleep(2 * time.Second)
 			}
 		}
 

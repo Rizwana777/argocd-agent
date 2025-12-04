@@ -327,6 +327,7 @@ func NewAgent(ctx context.Context, client *kube.KubernetesClient, namespace stri
 			MinVersion: tls.VersionTLS12,
 		}
 		if a.redisProxyMsgHandler.redisTLSInsecure {
+			log().Warn("INSECURE: Not verifying Redis TLS certificate for cluster cache")
 			clusterCacheTLSConfig.InsecureSkipVerify = true
 		} else if a.redisProxyMsgHandler.redisTLSCAPath != "" {
 			caCertPEM, err := os.ReadFile(a.redisProxyMsgHandler.redisTLSCAPath)
@@ -441,20 +442,22 @@ func (a *Agent) Start(ctx context.Context) error {
 
 	// Start the background process of periodic sync of cluster cache info.
 	// This will send periodic updates of Application, Resource and API counts to principal.
-	if a.mode == types.AgentModeManaged {
-		go func() {
-			ticker := time.NewTicker(a.cacheRefreshInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					a.addClusterCacheInfoUpdateToQueue()
-				case <-a.context.Done():
-					return
-				}
+	// Both managed and autonomous agents need to send cluster cache info updates
+	go func() {
+		// Send initial update immediately on startup (don't wait for first ticker)
+		a.addClusterCacheInfoUpdateToQueue()
+
+		ticker := time.NewTicker(a.cacheRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				a.addClusterCacheInfoUpdateToQueue()
+			case <-a.context.Done():
+				return
 			}
-		}()
-	}
+		}
+	}()
 
 	if a.remote != nil {
 		a.remote.SetClientMode(a.mode)

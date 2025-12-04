@@ -468,7 +468,7 @@ func observer(interval time.Duration) {
 // The secret names where the certificates are stored in are hard-coded at the
 // moment.
 func getResourceProxyTLSConfigFromKube(kubeClient *kube.KubernetesClient, namespace, certName, caName string) (*tls.Config, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	proxyCert, err := tlsutil.TLSCertFromSecret(ctx, kubeClient.Clientset, namespace, certName)
 	if err != nil {

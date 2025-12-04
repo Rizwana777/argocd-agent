@@ -59,8 +59,8 @@ echo "╚═══════════════════════�
 echo ""
 
 # Check certificates exist
-if [ ! -f "creds/redis-tls/ca.crt" ]; then
-    echo "Error: Redis TLS certificates not found"
+if [ ! -f "creds/redis-tls/${REDIS_CERT_PREFIX}.crt" ] || [ ! -f "creds/redis-tls/${REDIS_CERT_PREFIX}.key" ] || [ ! -f "creds/redis-tls/ca.crt" ]; then
+    echo "Error: Redis TLS certificates not found (${REDIS_CERT_PREFIX}.crt, ${REDIS_CERT_PREFIX}.key, or ca.crt)"
     echo "Please run: ./gen-redis-tls-certs.sh"
     exit 1
 fi
@@ -76,6 +76,48 @@ if ! kubectl get deployment argocd-redis -n ${NAMESPACE} &>/dev/null; then
 fi
 
 echo "Found Redis Deployment"
+echo ""
+
+# Scale down ArgoCD components that connect to Redis BEFORE enabling TLS
+# This prevents SSL errors during the transition (old pods trying to connect without TLS)
+echo "Scaling down ArgoCD components to prevent SSL errors during transition..."
+
+# Save current replica counts for restoration by configure-argocd-redis-tls.sh
+REPO_SERVER_REPLICAS=$(kubectl get deployment argocd-repo-server -n ${NAMESPACE} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+CONTROLLER_REPLICAS=$(kubectl get statefulset argocd-application-controller -n ${NAMESPACE} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+SERVER_REPLICAS=$(kubectl get deployment argocd-server -n ${NAMESPACE} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+
+# Store replica counts in a ConfigMap for the argocd-redis-tls script to use
+kubectl create configmap argocd-redis-tls-replicas \
+  --from-literal=repo-server=${REPO_SERVER_REPLICAS} \
+  --from-literal=application-controller=${CONTROLLER_REPLICAS} \
+  --from-literal=server=${SERVER_REPLICAS} \
+  -n ${NAMESPACE} \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Scale down components
+if kubectl get deployment argocd-repo-server -n ${NAMESPACE} &>/dev/null; then
+    kubectl scale deployment argocd-repo-server -n ${NAMESPACE} --replicas=0
+    echo "  Scaled down argocd-repo-server"
+fi
+
+if kubectl get statefulset argocd-application-controller -n ${NAMESPACE} &>/dev/null; then
+    kubectl scale statefulset argocd-application-controller -n ${NAMESPACE} --replicas=0
+    echo "  Scaled down argocd-application-controller"
+fi
+
+if kubectl get deployment argocd-server -n ${NAMESPACE} &>/dev/null; then
+    kubectl scale deployment argocd-server -n ${NAMESPACE} --replicas=0
+    echo "  Scaled down argocd-server"
+fi
+
+# Wait for pods to terminate
+echo "Waiting for ArgoCD pods to terminate..."
+kubectl wait --for=delete pod -l app.kubernetes.io/name=argocd-repo-server -n ${NAMESPACE} --timeout=60s 2>/dev/null || true
+kubectl wait --for=delete pod -l app.kubernetes.io/name=argocd-application-controller -n ${NAMESPACE} --timeout=60s 2>/dev/null || true
+kubectl wait --for=delete pod -l app.kubernetes.io/name=argocd-server -n ${NAMESPACE} --timeout=60s 2>/dev/null || true
+
+echo "ArgoCD components scaled down"
 echo ""
 
 # Create secret
@@ -193,12 +235,12 @@ if [ -n "$REDIS_POD" ]; then
     if [ "$POD_STATUS" = "Running" ]; then
         echo " Redis pod ${REDIS_POD} is running with TLS"
     elif [ "$POD_STATUS" = "Unknown" ]; then
-        echo "⚠️  Could not verify pod status (pod may have restarted during rollout)"
+        echo " Could not verify pod status (pod may have restarted during rollout)"
     else
         echo " Redis pod ${REDIS_POD} status: ${POD_STATUS}"
     fi
 else
-    echo "⚠️  Could not find Redis pod (may still be starting)"
+    echo " Could not find Redis pod (may still be starting)"
 fi
 
 echo ""

@@ -140,20 +140,9 @@ func (rp *RedisProxy) createServerTLSConfig() (*tls.Config, error) {
 		}
 	} else if rp.tlsServerCert != nil && rp.tlsServerKey != nil {
 		// Convert cert and key to tls.Certificate
-		certDER := rp.tlsServerCert.Raw
-		// For private key, we need to marshal it
-		keyDER, err := x509.MarshalPKCS8PrivateKey(rp.tlsServerKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal private key: %w", err)
-		}
-		cert.Certificate = [][]byte{certDER}
+		cert.Certificate = [][]byte{rp.tlsServerCert.Raw}
 		cert.PrivateKey = rp.tlsServerKey
 		cert.Leaf = rp.tlsServerCert
-
-		// Try to parse the key
-		if _, err := x509.ParsePKCS8PrivateKey(keyDER); err != nil {
-			return nil, fmt.Errorf("failed to parse private key: %w", err)
-		}
 	} else {
 		return nil, fmt.Errorf("no TLS certificate configured")
 	}

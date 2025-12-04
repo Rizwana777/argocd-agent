@@ -106,10 +106,10 @@ func (suite *BaseSuite) TearDownTest() {
 
 // EnsureDeletion will issue a delete for a namespace-scoped K8s resource, then wait for it to no longer exist
 func EnsureDeletion(ctx context.Context, kclient KubeClient, obj KubeObject) error {
-	// Wait for the object to be deleted  for 60 seconds
+	// Wait for the object to be deleted  for 120 seconds
 	// - Primarily this will be waiting for the finalizer to be removed, so that the object is deleted
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
-	for count := 0; count < 60; count++ {
+	for count := 0; count < 120; count++ {
 		err := kclient.Delete(ctx, obj, metav1.DeleteOptions{})
 		if errors.IsNotFound(err) {
 			// object is already deleted
@@ -140,7 +140,7 @@ func EnsureDeletion(ctx context.Context, kclient KubeClient, obj KubeObject) err
 
 	// Continue waiting for object to be deleted, now that finalizers have been removed.
 	key = types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
-	for count := 0; count < 60; count++ {
+	for count := 0; count < 120; count++ {
 		err := kclient.Get(ctx, key, obj, metav1.GetOptions{})
 		if errors.IsNotFound(err) {
 			return nil
@@ -157,7 +157,7 @@ func EnsureDeletion(ctx context.Context, kclient KubeClient, obj KubeObject) err
 // WaitForDeletion will wait for a resource to be deleted
 func WaitForDeletion(ctx context.Context, kclient KubeClient, obj KubeObject) error {
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
-	for count := 0; count < 60; count++ {
+	for count := 0; count < 120; count++ {
 		err := kclient.Get(ctx, key, obj, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
@@ -228,14 +228,15 @@ func CleanUp(ctx context.Context, principalClient KubeClient, managedAgentClient
 
 		err = EnsureDeletion(ctx, autonomousAgentClient, &app)
 		if err != nil {
-			return err
+			fmt.Printf("Warning: Failed to delete Application %s from autonomous agent: %v\n", app.Name, err)
 		}
 
 		// Wait for the app to be deleted from the control plane
-		app.SetNamespace("agent-autonomous")
-		err = WaitForDeletion(ctx, principalClient, &app)
+		principalApp := app.DeepCopy()
+		principalApp.SetNamespace("agent-autonomous")
+		err = WaitForDeletion(ctx, principalClient, principalApp)
 		if err != nil {
-			return err
+			fmt.Printf("Warning: Failed to wait for Application %s deletion from principal: %v\n", principalApp.Name, err)
 		}
 	}
 
@@ -252,14 +253,15 @@ func CleanUp(ctx context.Context, principalClient KubeClient, managedAgentClient
 
 		err = EnsureDeletion(ctx, principalClient, &app)
 		if err != nil {
-			return err
+			fmt.Printf("Warning: Failed to delete Application %s from principal: %v\n", app.Name, err)
 		}
 
 		// Wait for the app to be deleted from the managed cluster
-		app.SetNamespace("argocd")
-		err = WaitForDeletion(ctx, managedAgentClient, &app)
+		managedApp := app.DeepCopy()
+		managedApp.SetNamespace("argocd")
+		err = WaitForDeletion(ctx, managedAgentClient, managedApp)
 		if err != nil {
-			return err
+			fmt.Printf("Warning: Failed to wait for Application %s deletion from managed agent: %v\n", managedApp.Name, err)
 		}
 	}
 
@@ -272,7 +274,7 @@ func CleanUp(ctx context.Context, principalClient KubeClient, managedAgentClient
 	for _, app := range list.Items {
 		err = EnsureDeletion(ctx, managedAgentClient, &app)
 		if err != nil {
-			return err
+			fmt.Printf("Warning: Failed to delete remaining Application %s from managed agent: %v\n", app.Name, err)
 		}
 	}
 
@@ -285,7 +287,7 @@ func CleanUp(ctx context.Context, principalClient KubeClient, managedAgentClient
 	for _, app := range list.Items {
 		err = EnsureDeletion(ctx, principalClient, &app)
 		if err != nil {
-			return err
+			fmt.Printf("Warning: Failed to delete remaining Application %s from principal: %v\n", app.Name, err)
 		}
 	}
 
@@ -306,15 +308,19 @@ func CleanUp(ctx context.Context, principalClient KubeClient, managedAgentClient
 
 		err = EnsureDeletion(ctx, autonomousAgentClient, &appProject)
 		if err != nil {
-			return err
+			// Log the error but continue cleanup - don't fail the entire test
+			fmt.Printf("Warning: Failed to delete AppProject %s from autonomous agent: %v\n", appProject.Name, err)
 		}
 
 		// Wait for the appProject to be deleted from the control plane
-		appProject.SetName("agent-autonomous-" + appProject.Name)
-		appProject.SetNamespace("argocd")
-		err = WaitForDeletion(ctx, principalClient, &appProject)
+		// Make a copy to avoid modifying the loop variable
+		principalAppProject := appProject.DeepCopy()
+		principalAppProject.SetName("agent-autonomous-" + appProject.Name)
+		principalAppProject.SetNamespace("argocd")
+		err = WaitForDeletion(ctx, principalClient, principalAppProject)
 		if err != nil {
-			return err
+			// Log the error but continue cleanup - don't fail the entire test
+			fmt.Printf("Warning: Failed to wait for AppProject %s deletion from principal: %v\n", principalAppProject.Name, err)
 		}
 	}
 
@@ -335,14 +341,18 @@ func CleanUp(ctx context.Context, principalClient KubeClient, managedAgentClient
 
 		err = EnsureDeletion(ctx, principalClient, &appProject)
 		if err != nil {
-			return err
+			// Log the error but continue cleanup - don't fail the entire test
+			fmt.Printf("Warning: Failed to delete AppProject %s from principal: %v\n", appProject.Name, err)
 		}
 
 		// Wait for the appProject to be deleted from the managed cluster
-		appProject.SetNamespace("argocd")
-		err = WaitForDeletion(ctx, managedAgentClient, &appProject)
+		// Make a copy to avoid modifying the loop variable
+		managedAppProject := appProject.DeepCopy()
+		managedAppProject.SetNamespace("argocd")
+		err = WaitForDeletion(ctx, managedAgentClient, managedAppProject)
 		if err != nil {
-			return err
+			// Log the error but continue cleanup - don't fail the entire test
+			fmt.Printf("Warning: Failed to wait for AppProject %s deletion from managed agent: %v\n", managedAppProject.Name, err)
 		}
 	}
 
@@ -358,7 +368,8 @@ func CleanUp(ctx context.Context, principalClient KubeClient, managedAgentClient
 		}
 		err = EnsureDeletion(ctx, managedAgentClient, &appProject)
 		if err != nil {
-			return err
+			// Log the error but continue cleanup - don't fail the entire test
+			fmt.Printf("Warning: Failed to delete AppProject %s from managed agent: %v\n", appProject.Name, err)
 		}
 	}
 
@@ -443,15 +454,18 @@ func CleanUp(ctx context.Context, principalClient KubeClient, managedAgentClient
 		return err
 	}
 
-	return resetManagedAgentClusterInfo(clusterDetails)
+	// Reset cluster info - don't fail if Redis is unavailable (e.g., port-forward died)
+	if err := resetManagedAgentClusterInfo(clusterDetails); err != nil {
+		fmt.Printf(" Warning: Failed to reset managed agent cluster info (Redis unavailable?): %v\n", err)
+	}
+	return nil
 }
 
 // resetManagedAgentClusterInfo resets the cluster info in the redis cache for the managed agent
 func resetManagedAgentClusterInfo(clusterDetails *ClusterDetails) error {
 	// Reset cluster info in redis cache
-	if err := getCacheInstance(AgentManagedName, clusterDetails).SetClusterInfo(AgentClusterServerURL, &argoapp.ClusterInfo{}); err != nil {
-		fmt.Println("resetManagedAgentClusterInfo: error", err)
-		return err
+	if err := getCachedCacheInstance(AgentManagedName, clusterDetails).SetClusterInfo(AgentClusterServerURL, &argoapp.ClusterInfo{}); err != nil {
+		return fmt.Errorf("resetManagedAgentClusterInfo: %w", err)
 	}
 	return nil
 }

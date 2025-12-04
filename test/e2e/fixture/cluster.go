@@ -18,6 +18,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"os"
+	"sync"
 	"time"
 
 	appv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
@@ -122,7 +124,7 @@ func GetManagedAgentClusterInfo(clusterDetails *ClusterDetails) (appv1.ClusterIn
 
 	// Fetch cluster info from redis cache
 	clusterInfo := appv1.ClusterInfo{}
-	err := getCacheInstance(AgentManagedName, clusterDetails).GetClusterInfo(AgentClusterServerURL, &clusterInfo)
+	err := getCachedCacheInstance(AgentManagedName, clusterDetails).GetClusterInfo(AgentClusterServerURL, &clusterInfo)
 	if err != nil {
 		// Treat missing cache key error (means no apps exist yet) as zero-value info
 		if err == cacheutil.ErrCacheMiss {
@@ -149,12 +151,17 @@ func GetPrincipalClusterInfo(agentName string, clusterDetails *ClusterDetails) (
 		return appv1.ClusterInfo{}, fmt.Errorf("invalid agent name: %s", agentName)
 	}
 
-	err := getCacheInstance(PrincipalName, clusterDetails).GetClusterInfo(server, &clusterInfo)
+	fmt.Printf("GetPrincipalClusterInfo: Looking up cluster info for agent=%s, server=%s, redis=%s\n",
+		agentName, server, clusterDetails.PrincipalRedisAddr)
+
+	err := getCachedCacheInstance(PrincipalName, clusterDetails).GetClusterInfo(server, &clusterInfo)
 	if err != nil {
 		// Treat missing cache key error (means no apps exist yet) as zero-value info
 		if err == cacheutil.ErrCacheMiss {
+			fmt.Printf("GetPrincipalClusterInfo: Cache miss for server=%s\n", server)
 			return appv1.ClusterInfo{}, nil
 		}
+		fmt.Printf("GetPrincipalClusterInfo: Error getting cluster info: %v\n", err)
 		return clusterInfo, err
 	}
 	return clusterInfo, err
@@ -196,11 +203,67 @@ func getCacheInstance(source string, clusterDetails *ClusterDetails) *appstateca
 		panic(fmt.Sprintf("invalid source: %s", source))
 	}
 
+	// Set generous timeouts for E2E tests to handle port-forward latency
+	redisOptions.DialTimeout = 10 * time.Second
+	redisOptions.ReadTimeout = 30 * time.Second // Increased to handle slow operations under load
+	redisOptions.WriteTimeout = 10 * time.Second
+	// Configure connection pool to handle concurrent test operations
+	redisOptions.PoolSize = 10                     // Increased for concurrent test load
+	redisOptions.MinIdleConns = 2                  // Keep some connections warm
+	redisOptions.MaxIdleConns = 5                  // Limit idle connections
+	redisOptions.ConnMaxIdleTime = 5 * time.Minute // Close idle connections
+	redisOptions.MaxRetries = 3
+	redisOptions.MinRetryBackoff = 100 * time.Millisecond
+	redisOptions.MaxRetryBackoff = 1 * time.Second
+
 	redisClient := redis.NewClient(redisOptions)
 	cache := appstatecache.NewCache(cacheutil.NewCache(
 		cacheutil.NewRedisCache(redisClient, 0, cacheutil.RedisCompressionGZip)), 0)
 
 	return cache
+}
+
+// cachedRedisClients stores Redis clients to prevent connection leaks
+var (
+	cachedRedisClients     = make(map[string]*appstatecache.Cache)
+	cachedRedisClientMutex sync.Mutex
+)
+
+// getCachedCacheInstance returns a cached Redis client or creates a new one
+func getCachedCacheInstance(source string, clusterDetails *ClusterDetails) *appstatecache.Cache {
+	cachedRedisClientMutex.Lock()
+	defer cachedRedisClientMutex.Unlock()
+
+	// Create cache key based on source and address
+	var cacheKey string
+	switch source {
+	case PrincipalName:
+		cacheKey = fmt.Sprintf("%s:%s", source, clusterDetails.PrincipalRedisAddr)
+	case AgentManagedName:
+		cacheKey = fmt.Sprintf("%s:%s", source, clusterDetails.ManagedAgentRedisAddr)
+	default:
+		panic(fmt.Sprintf("invalid source for cached client: %s", source))
+	}
+
+	// Return cached client if it exists
+	if client, ok := cachedRedisClients[cacheKey]; ok {
+		return client
+	}
+
+	// Create new client and cache it
+	client := getCacheInstance(source, clusterDetails)
+	cachedRedisClients[cacheKey] = client
+	return client
+}
+
+// CleanupRedisCachedClients closes all cached Redis clients (should be called at end of test suite)
+func CleanupRedisCachedClients() {
+	cachedRedisClientMutex.Lock()
+	defer cachedRedisClientMutex.Unlock()
+
+	fmt.Printf("Cleaning up %d cached Redis clients\n", len(cachedRedisClients))
+	// Clear the cache map - connections will be garbage collected
+	cachedRedisClients = make(map[string]*appstatecache.Cache)
 }
 
 // getClusterConfigurations gets the cluster configurations from the managed and principal clusters
@@ -253,26 +316,32 @@ func getManagedAgentRedisConfig(ctx context.Context, managedAgentClient KubeClie
 	if redisAddr == "" {
 		return fmt.Errorf("could not get Redis server address from LoadBalancer ingress, spec, or ClusterIP")
 	}
+
+	// Redis TLS is always enabled for E2E tests
+	clusterDetails.ManagedAgentRedisTLSEnabled = true
+
+	// Allow override via environment variable for local development with port-forward
+	if envAddr := os.Getenv("MANAGED_AGENT_REDIS_ADDR"); envAddr != "" {
+		redisAddr = envAddr
+	}
+
 	clusterDetails.ManagedAgentRedisAddr = redisAddr
 
 	// Fetch Redis secret to get the password
-	secretSecret := &corev1.Secret{}
+	secret := &corev1.Secret{}
 	secretKey := types.NamespacedName{Name: "argocd-redis", Namespace: "argocd"}
-	err = managedAgentClient.Get(ctx, secretKey, secretSecret, metav1.GetOptions{})
+	err = managedAgentClient.Get(ctx, secretKey, secret, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get Redis secret: %w", err)
 	}
 
 	// Decode the password from base64
-	authData, exists := secretSecret.Data["auth"]
+	authData, exists := secret.Data["auth"]
 	if !exists {
 		return fmt.Errorf("auth field is not found in Redis secret")
 	}
 
 	clusterDetails.ManagedAgentRedisPassword = string(authData)
-
-	// Redis TLS is enabled by default in argocd-agent
-	clusterDetails.ManagedAgentRedisTLSEnabled = true
 
 	return nil
 }
@@ -308,26 +377,31 @@ func getPrincipalRedisConfig(ctx context.Context, principalClient KubeClient, cl
 	if redisAddr == "" {
 		return fmt.Errorf("could not get Principal Redis server address from LoadBalancer ingress, spec, or ClusterIP")
 	}
+
+	clusterDetails.PrincipalRedisTLSEnabled = true
+
+	// Allow override via environment variable for local development with port-forward
+	if envAddr := os.Getenv("ARGOCD_PRINCIPAL_REDIS_SERVER_ADDRESS"); envAddr != "" {
+		redisAddr = envAddr
+	}
+
 	clusterDetails.PrincipalRedisAddr = redisAddr
 
 	// Fetch Redis secret to get the password
-	principalSecret := &corev1.Secret{}
-	principalSecretKey := types.NamespacedName{Name: "argocd-redis", Namespace: "argocd"}
-	err = principalClient.Get(ctx, principalSecretKey, principalSecret, metav1.GetOptions{})
+	secret := &corev1.Secret{}
+	secretKey := types.NamespacedName{Name: "argocd-redis", Namespace: "argocd"}
+	err = principalClient.Get(ctx, secretKey, secret, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get Principal Redis secret: %w", err)
 	}
 
 	// Decode the password from base64
-	authData, exists := principalSecret.Data["auth"]
+	authData, exists := secret.Data["auth"]
 	if !exists {
 		return fmt.Errorf("auth field is not found in Principal Redis secret")
 	}
 
 	clusterDetails.PrincipalRedisPassword = string(authData)
-
-	// Redis TLS is enabled by default in argocd-agent
-	clusterDetails.PrincipalRedisTLSEnabled = true
 
 	return nil
 }

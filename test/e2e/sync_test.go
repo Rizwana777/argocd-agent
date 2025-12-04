@@ -368,7 +368,7 @@ func (suite *SyncTestSuite) Test_TerminateOperationManaged() {
 	// Wait for the pre-sync job to be removed
 	hook := batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pre-post-sync-before",
+			Name:      "before",
 			Namespace: "guestbook",
 		},
 	}
@@ -463,7 +463,7 @@ func (suite *SyncTestSuite) Test_TerminateOperationAutonomous() {
 	// Wait for the pre-sync job to be removed
 	hook := batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pre-post-sync-before",
+			Name:      "before",
 			Namespace: "guestbook",
 		},
 	}
