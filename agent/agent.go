@@ -142,11 +142,10 @@ type AgentOption func(*Agent) error
 // options.
 func NewAgent(ctx context.Context, client *kube.KubernetesClient, namespace string, opts ...AgentOption) (*Agent, error) {
 	a := &Agent{
-		version:              version.New("argocd-agent"),
-		deletions:            manager.NewDeletionTracker(),
-		sourceCache:          cache.NewSourceCache(),
-		inflightLogs:         make(map[string]struct{}),
-		cacheRefreshInterval: 30 * time.Second, // Default interval, can be overridden via WithCacheRefreshInterval
+		version:      version.New("argocd-agent"),
+		deletions:    manager.NewDeletionTracker(),
+		sourceCache:  cache.NewSourceCache(),
+		inflightLogs: make(map[string]struct{}),
 	}
 	a.infStopCh = make(chan struct{})
 	a.namespace = namespace
@@ -164,6 +163,10 @@ func NewAgent(ctx context.Context, client *kube.KubernetesClient, namespace stri
 
 	if a.remote == nil {
 		return nil, fmt.Errorf("remote not defined")
+	}
+
+	if a.cacheRefreshInterval == 0 {
+		return nil, fmt.Errorf("cache refresh interval not set")
 	}
 
 	a.kubeClient = client
@@ -344,6 +347,8 @@ func NewAgent(ctx context.Context, client *kube.KubernetesClient, namespace stri
 				return nil, fmt.Errorf("failed to parse CA certificate for cluster cache from %s", a.redisProxyMsgHandler.redisTLSCAPath)
 			}
 			clusterCacheTLSConfig.RootCAs = certPool
+		} else {
+			return nil, fmt.Errorf("redis TLS enabled but no CA certificate configured for cluster cache: use --redis-tls-ca-path or --redis-tls-insecure")
 		}
 	}
 
@@ -447,22 +452,20 @@ func (a *Agent) Start(ctx context.Context) error {
 
 	// Start the background process of periodic sync of cluster cache info.
 	// This will send periodic updates of Application, Resource and API counts to principal.
-	// Both managed and autonomous agents need to send cluster cache info updates
-	go func() {
-		// Send initial update immediately on startup (don't wait for first ticker)
-		a.addClusterCacheInfoUpdateToQueue()
-
-		ticker := time.NewTicker(a.cacheRefreshInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				a.addClusterCacheInfoUpdateToQueue()
-			case <-a.context.Done():
-				return
+	if a.mode == types.AgentModeManaged {
+		go func() {
+			ticker := time.NewTicker(a.cacheRefreshInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					a.addClusterCacheInfoUpdateToQueue()
+				case <-a.context.Done():
+					return
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	if a.remote != nil {
 		a.remote.SetClientMode(a.mode)
