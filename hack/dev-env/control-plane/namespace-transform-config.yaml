@@ -1,0 +1,4 @@
+# Configuration to tell kustomize to update namespace in ClusterRoleBinding subjects
+namespace:
+- path: subjects/namespace
+  kind: ClusterRoleBinding
